@@ -115,6 +115,7 @@ class DouyinLiveWebFetcher:
         self.abogus_file = abogus_file
         self.__ttwid = None
         self.__room_id = None
+        self.on_comment = None
         self.session = requests.Session()
         self.live_id = live_id
         self.host = "https://www.douyin.com/"
@@ -351,6 +352,8 @@ class DouyinLiveWebFetcher:
         user_id = message.user.id
         content = message.content
         print(f"【聊天msg】[{user_id}]{user_name}: {content}")
+        if self.on_comment:
+            self.on_comment(message)
     
     def _parseGiftMsg(self, payload):
         """礼物消息"""
