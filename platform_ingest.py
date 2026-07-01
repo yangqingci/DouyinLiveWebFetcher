@@ -19,6 +19,7 @@ class IngestConfig:
     url: str
     token: str
     room_id: str | None
+    game_code: str | None
 
 
 def _read_env(name: str) -> str:
@@ -56,6 +57,7 @@ def _usage() -> str:
         "  DOUYIN_LIVE_ID  Used when <douyin_live_id> is not passed\n\n"
         "Optional config keys:\n"
         "  INGEST_ROOM_ID  Sent as douyin_room_id; defaults to the live id\n"
+        "  INGEST_GAME_CODE  Target platform game, e.g. danmaku_exam\n"
     )
 
 
@@ -67,18 +69,28 @@ def load_runtime_config(argv: list[str]) -> tuple[str, IngestConfig]:
     ingest_url = _require_env("INGEST_URL")
     ingest_token = _require_env("INGEST_TOKEN")
     room_id = _read_env("INGEST_ROOM_ID") or live_id
-    return live_id, IngestConfig(url=ingest_url, token=ingest_token, room_id=room_id)
+    game_code = _read_env("INGEST_GAME_CODE") or None
+    return live_id, IngestConfig(
+        url=ingest_url,
+        token=ingest_token,
+        room_id=room_id,
+        game_code=game_code,
+    )
 
 
 def build_ingest_payload(
     nickname: str,
     text: str,
     room_id: str | None,
+    game_code: str | None,
 ) -> dict[str, str]:
     payload = {"nickname": nickname, "text": text}
     normalized_room_id = (room_id or "").strip()
     if normalized_room_id:
         payload["douyin_room_id"] = normalized_room_id
+    normalized_game_code = (game_code or "").strip()
+    if normalized_game_code:
+        payload["game_code"] = normalized_game_code
     return payload
 
 
@@ -92,7 +104,12 @@ def post_comment(config: IngestConfig, message) -> None:
     response = requests.post(
         config.url,
         headers={"X-Ingest-Token": config.token},
-        json=build_ingest_payload(nickname, text, config.room_id),
+        json=build_ingest_payload(
+            nickname,
+            text,
+            config.room_id,
+            config.game_code,
+        ),
         timeout=REQUEST_TIMEOUT_SEC,
     )
     response.raise_for_status()
@@ -119,7 +136,11 @@ def main(argv: list[str] | None = None) -> None:
             print(f"[ingest] post failed: {exc}")
 
     fetcher.on_comment = on_comment
-    print(f"[ingest] forwarding live {live_id} danmaku to {ingest_config.url}")
+    game_label = ingest_config.game_code or "platform default"
+    print(
+        f"[ingest] forwarding live {live_id} danmaku to "
+        f"{ingest_config.url} game={game_label}"
+    )
     fetcher.start()
 
 
