@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -144,13 +145,29 @@ def run_forwarder(
     *,
     log=print,
 ) -> None:
-    fetcher = DouyinLiveWebFetcher(live_id)
+    fetcher = DouyinLiveWebFetcher(live_id, log=log, log_events=False)
+    forwarded_count = 0
+    failed_count = 0
+    last_progress_log = 0.0
+    last_failure_log = 0.0
 
     def on_comment(message) -> None:
+        nonlocal failed_count, forwarded_count, last_failure_log, last_progress_log
         try:
             post_comment(ingest_config, message)
         except Exception as exc:
-            log(f"[ingest] post failed: {exc}")
+            failed_count += 1
+            now = time.monotonic()
+            if failed_count == 1 or now - last_failure_log >= 10:
+                log(f"[ingest] post failed ({failed_count} total): {exc}")
+                last_failure_log = now
+            return
+
+        forwarded_count += 1
+        now = time.monotonic()
+        if forwarded_count == 1 or now - last_progress_log >= 10:
+            log(f"[ingest] forwarded {forwarded_count} danmaku message(s)")
+            last_progress_log = now
 
     fetcher.on_comment = on_comment
     game_label = ingest_config.game_code or "platform default"

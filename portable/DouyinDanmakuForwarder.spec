@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import certifi
 import py_mini_racer
 
 PORTABLE_DIR = Path(SPECPATH).resolve()
@@ -28,6 +29,7 @@ datas = [
     (str(ROOT / "webmssdk.js"), "."),
     (str(ROOT / "platform_ingest.env.example"), "."),
     (str(ROOT / "protobuf" / "douyin.proto"), "protobuf"),
+    (require_file(Path(certifi.where())), "certifi"),
     *[
         (require_file(PY_MINI_RACER_DIR / file_name), ".")
         for file_name in mini_racer_runtime_files

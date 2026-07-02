@@ -72,6 +72,7 @@ $RequiredFiles = @(
     "_internal\mini_racer.dll",
     "_internal\icudtl.dat",
     "_internal\snapshot_blob.bin",
+    "_internal\certifi\cacert.pem",
     "platform_ingest.env.example",
     "start-forwarder.bat",
     "README.md"

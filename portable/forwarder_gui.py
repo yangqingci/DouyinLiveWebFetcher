@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import contextlib
-import io
 import queue
 import sys
 import threading
@@ -16,12 +14,16 @@ if str(PROJECT_DIR) not in sys.path:
 from platform_ingest import ENV_FILE, IngestConfig, run_forwarder
 
 DEFAULT_VALUES = {
-    "INGEST_URL": "https://www.yangqingci.com/ingest",
+    "INGEST_URL": "http://www.yangqingci.com/ingest",
     "INGEST_TOKEN": "",
     "DOUYIN_LIVE_ID": "",
     "INGEST_ROOM_ID": "",
     "INGEST_GAME_CODE": "danmaku_exam",
 }
+
+LOG_POLL_BATCH_SIZE = 50
+LOG_LINE_LIMIT = 500
+LOG_QUEUE_LIMIT = 1000
 
 GAME_OPTIONS = (
     ("弹幕答题/驾考", "danmaku_exam"),
@@ -65,6 +67,8 @@ class ForwarderApp:
         self.root.minsize(640, 460)
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.worker: threading.Thread | None = None
+        self.log_line_count = 0
+        self.dropped_log_count = 0
         self.vars = {
             "INGEST_URL": tk.StringVar(),
             "INGEST_TOKEN": tk.StringVar(),
@@ -127,7 +131,8 @@ class ForwarderApp:
         button_frame = ttk.Frame(frame)
         button_frame.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(10, 8))
         ttk.Button(button_frame, text="保存配置", command=self.save_config).pack(side=tk.LEFT)
-        ttk.Button(button_frame, text="开始采集", command=self.start_forwarder).pack(
+        self.start_button = ttk.Button(button_frame, text="开始采集", command=self.start_forwarder)
+        self.start_button.pack(
             side=tk.LEFT,
             padx=8,
         )
@@ -211,6 +216,7 @@ class ForwarderApp:
             game_code=values["INGEST_GAME_CODE"],
         )
         self.status_var.set("正在采集")
+        self.start_button.configure(state=tk.DISABLED)
         self.worker = threading.Thread(
             target=self._run_worker,
             args=(values["DOUYIN_LIVE_ID"], config),
@@ -219,53 +225,50 @@ class ForwarderApp:
         self.worker.start()
 
     def _run_worker(self, live_id: str, config: IngestConfig) -> None:
-        class QueueWriter(io.TextIOBase):
-            def __init__(self, log_queue: queue.Queue[str]) -> None:
-                self._log_queue = log_queue
-                self._buffer = ""
-
-            def writable(self) -> bool:
-                return True
-
-            def write(self, text: str) -> int:
-                if not text:
-                    return 0
-                self._buffer += text
-                while "\n" in self._buffer:
-                    line, self._buffer = self._buffer.split("\n", 1)
-                    line = line.strip()
-                    if line:
-                        self._log_queue.put(line)
-                return len(text)
-
-            def flush(self) -> None:
-                line = self._buffer.strip()
-                if line:
-                    self._log_queue.put(line)
-                self._buffer = ""
-
         try:
-            writer = QueueWriter(self.log_queue)
-            with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
-                run_forwarder(live_id, config, log=self.log_queue.put)
+            run_forwarder(live_id, config, log=self._enqueue_worker_log)
         except Exception as exc:
-            self.log_queue.put(f"[error] {exc}")
-            self.log_queue.put("[status] stopped")
+            self._enqueue_worker_log(f"[error] {exc}")
+            self._enqueue_worker_log("[status] stopped")
+
+    def _enqueue_worker_log(self, message: str) -> None:
+        if message == "[status] stopped":
+            self.log_queue.put(message)
+            return
+
+        if self.log_queue.qsize() >= LOG_QUEUE_LIMIT:
+            self.dropped_log_count += 1
+            return
+
+        if self.dropped_log_count and self.log_queue.qsize() < LOG_QUEUE_LIMIT - 1:
+            dropped_count = self.dropped_log_count
+            self.dropped_log_count = 0
+            self.log_queue.put(f"[log] skipped {dropped_count} log line(s) to keep the UI responsive")
+
+        self.log_queue.put(str(message))
 
     def _poll_log_queue(self) -> None:
-        while True:
+        processed = 0
+        while processed < LOG_POLL_BATCH_SIZE:
             try:
                 message = self.log_queue.get_nowait()
             except queue.Empty:
                 break
+            processed += 1
             if message == "[status] stopped":
                 self.status_var.set("已停止")
+                self.start_button.configure(state=tk.NORMAL)
             else:
                 self._append_log(message)
         self.root.after(200, self._poll_log_queue)
 
     def _append_log(self, message: str) -> None:
         self.log_text.insert(tk.END, message + "\n")
+        self.log_line_count += 1
+        if self.log_line_count > LOG_LINE_LIMIT:
+            overflow = self.log_line_count - LOG_LINE_LIMIT
+            self.log_text.delete("1.0", f"{overflow + 1}.0")
+            self.log_line_count = LOG_LINE_LIMIT
         self.log_text.see(tk.END)
 
 
