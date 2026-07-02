@@ -13,11 +13,13 @@ import random
 import re
 import string
 import subprocess
+import sys
 import threading
 import time
 import execjs
 import urllib.parse
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 import requests
@@ -30,13 +32,37 @@ from protobuf.douyin import *
 from urllib3.util.url import parse_url
 
 
+def app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = app_dir()
+
+
+def resource_path(path: str) -> Path:
+    file_path = Path(path)
+    if file_path.is_absolute():
+        return file_path
+    candidates = [
+        APP_DIR / file_path,
+        Path(getattr(sys, "_MEIPASS", APP_DIR)) / file_path,
+        APP_DIR / "_internal" / file_path,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 def execute_js(js_file: str):
     """
     执行 JavaScript 文件
     :param js_file: JavaScript 文件路径
     :return: 执行结果
     """
-    with open(js_file, 'r', encoding='utf-8') as file:
+    with open(resource_path(js_file), 'r', encoding='utf-8') as file:
         js_code = file.read()
     
     ctx = execjs.compile(js_code)
@@ -71,7 +97,7 @@ def generateSignature(wss, script_file='sign.js'):
     md5.update(param.encode())
     md5_param = md5.hexdigest()
     
-    with codecs.open(script_file, 'r', encoding='utf8') as f:
+    with codecs.open(resource_path(script_file), 'r', encoding='utf8') as f:
         script = f.read()
     
     ctx = MiniRacer()

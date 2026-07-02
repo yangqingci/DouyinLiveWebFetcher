@@ -10,8 +10,31 @@ import requests
 from liveMan import DouyinLiveWebFetcher
 
 REQUEST_TIMEOUT_SEC = 2.0
-ENV_FILE = Path(__file__).with_name("platform_ingest.env")
-ENV_EXAMPLE_FILE = Path(__file__).with_name("platform_ingest.env.example")
+
+
+def app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = app_dir()
+ENV_FILE = APP_DIR / "platform_ingest.env"
+
+
+def bundled_file(name: str) -> Path:
+    candidates = [
+        APP_DIR / name,
+        Path(getattr(sys, "_MEIPASS", APP_DIR)) / name,
+        APP_DIR / "_internal" / name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+ENV_EXAMPLE_FILE = bundled_file("platform_ingest.env.example")
 
 
 @dataclass(frozen=True)
@@ -115,6 +138,29 @@ def post_comment(config: IngestConfig, message) -> None:
     response.raise_for_status()
 
 
+def run_forwarder(
+    live_id: str,
+    ingest_config: IngestConfig,
+    *,
+    log=print,
+) -> None:
+    fetcher = DouyinLiveWebFetcher(live_id)
+
+    def on_comment(message) -> None:
+        try:
+            post_comment(ingest_config, message)
+        except Exception as exc:
+            log(f"[ingest] post failed: {exc}")
+
+    fetcher.on_comment = on_comment
+    game_label = ingest_config.game_code or "platform default"
+    log(
+        f"[ingest] forwarding live {live_id} danmaku to "
+        f"{ingest_config.url} game={game_label}"
+    )
+    fetcher.start()
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = argv or sys.argv
     try:
@@ -127,21 +173,7 @@ def main(argv: list[str] | None = None) -> None:
         print(_usage())
         raise SystemExit(1) from exc
 
-    fetcher = DouyinLiveWebFetcher(live_id)
-
-    def on_comment(message) -> None:
-        try:
-            post_comment(ingest_config, message)
-        except Exception as exc:
-            print(f"[ingest] post failed: {exc}")
-
-    fetcher.on_comment = on_comment
-    game_label = ingest_config.game_code or "platform default"
-    print(
-        f"[ingest] forwarding live {live_id} danmaku to "
-        f"{ingest_config.url} game={game_label}"
-    )
-    fetcher.start()
+    run_forwarder(live_id, ingest_config)
 
 
 if __name__ == "__main__":
