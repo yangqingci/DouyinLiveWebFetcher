@@ -4,6 +4,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -12,10 +13,12 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 from platform_client import (
+    CLIENT_VERSION,
     PlatformBootstrap,
     PlatformClient,
     PlatformGame,
     PlatformStream,
+    PlatformVersionCheck,
     normalize_platform_url,
 )
 from platform_ingest import ENV_FILE, IngestConfig, run_forwarder
@@ -75,6 +78,9 @@ class ForwarderApp:
         self.log_line_count = 0
         self.dropped_log_count = 0
         self.bootstrap: PlatformBootstrap | None = None
+        self.version_check: PlatformVersionCheck | None = None
+        self.update_required = False
+        self.update_download_url = ""
         self.streams: list[PlatformStream] = []
         self.games: list[PlatformGame] = []
         self.vars = {
@@ -143,14 +149,23 @@ class ForwarderApp:
             pady=6,
         )
 
-        ttk.Label(self.client_frame, text="直播间").grid(row=1, column=0, sticky=tk.W, pady=6)
+        ttk.Label(self.client_frame, text="客户端版本").grid(row=1, column=0, sticky=tk.W, pady=6)
+        self.version_var = tk.StringVar(value=f"当前版本 {CLIENT_VERSION}")
+        ttk.Label(self.client_frame, textvariable=self.version_var).grid(
+            row=1,
+            column=1,
+            sticky=tk.W,
+            pady=6,
+        )
+
+        ttk.Label(self.client_frame, text="直播间").grid(row=2, column=0, sticky=tk.W, pady=6)
         self.stream_box = ttk.Combobox(self.client_frame, state="readonly")
-        self.stream_box.grid(row=1, column=1, sticky=tk.EW, pady=6)
+        self.stream_box.grid(row=2, column=1, sticky=tk.EW, pady=6)
         self.stream_box.bind("<<ComboboxSelected>>", lambda _event: self._set_stream_from_label())
 
-        ttk.Label(self.client_frame, text="游戏").grid(row=2, column=0, sticky=tk.W, pady=6)
+        ttk.Label(self.client_frame, text="游戏").grid(row=3, column=0, sticky=tk.W, pady=6)
         self.game_box = ttk.Combobox(self.client_frame, state="readonly")
-        self.game_box.grid(row=2, column=1, sticky=tk.EW, pady=6)
+        self.game_box.grid(row=3, column=1, sticky=tk.EW, pady=6)
         self.game_box.bind("<<ComboboxSelected>>", lambda _event: self._set_game_from_label())
 
         button_frame = ttk.Frame(frame)
@@ -161,6 +176,12 @@ class ForwarderApp:
             command=lambda: self.refresh_platform_config(silent=False),
         )
         self.refresh_button.pack(side=tk.LEFT)
+        self.update_button = ttk.Button(
+            button_frame,
+            text="下载更新",
+            command=self.download_update,
+        )
+        self.update_button.pack(side=tk.LEFT, padx=8)
         self.start_button = ttk.Button(button_frame, text="开始采集", command=self.start_forwarder)
         self.start_button.pack(side=tk.LEFT, padx=8)
         self.logout_button = ttk.Button(button_frame, text="退出登录", command=self.logout)
@@ -232,7 +253,8 @@ class ForwarderApp:
         except Exception as exc:
             self.log_queue.put(("login_error", str(exc)))
             return
-        self.log_queue.put(("login_success", platform_url, token, bootstrap))
+        version_check, version_error = self._check_version(client)
+        self.log_queue.put(("login_success", platform_url, token, bootstrap, version_check, version_error))
 
     def refresh_platform_config(self, *, silent: bool) -> None:
         if not self.vars["ACCESS_TOKEN"].get().strip():
@@ -249,19 +271,34 @@ class ForwarderApp:
 
     def _refresh_worker(self, silent: bool) -> None:
         try:
-            bootstrap = self._client().bootstrap()
+            client = self._client()
+            bootstrap = client.bootstrap()
         except Exception as exc:
             self.log_queue.put(("refresh_error", str(exc), silent))
             return
-        self.log_queue.put(("refresh_success", bootstrap, silent))
+        version_check, version_error = self._check_version(client)
+        self.log_queue.put(("refresh_success", bootstrap, version_check, version_error, silent))
+
+    def _check_version(
+        self,
+        client: PlatformClient,
+    ) -> tuple[PlatformVersionCheck | None, str]:
+        try:
+            return client.check_version(), ""
+        except Exception as exc:
+            return None, str(exc)
 
     def logout(self) -> None:
         self.vars["ACCESS_TOKEN"].set("")
         self.vars["PASSWORD"].set("")
         self.bootstrap = None
+        self.version_check = None
+        self.update_required = False
+        self.update_download_url = ""
         self.streams = []
         self.games = []
         self.user_var.set("未登录")
+        self.version_var.set(f"当前版本 {CLIENT_VERSION}")
         self.stream_box.configure(values=())
         self.game_box.configure(values=())
         self._save_values()
@@ -285,6 +322,50 @@ class ForwarderApp:
             self.status_var.set("当前账号没有可用游戏权限")
         else:
             self.status_var.set("已登录，配置已同步")
+
+    def _apply_version_check(
+        self,
+        version_check: PlatformVersionCheck | None,
+        error: str,
+    ) -> None:
+        self.version_check = version_check
+        self.update_required = False
+        self.update_download_url = ""
+        if error:
+            self.version_var.set(f"当前版本 {CLIENT_VERSION}（更新检查失败）")
+            self._append_log(f"[update] {error}")
+            self._set_logged_in_ui(True)
+            return
+        if version_check is None or not version_check.has_update or version_check.latest is None:
+            self.version_var.set(f"当前版本 {CLIENT_VERSION}（已是最新）")
+            self._set_logged_in_ui(True)
+            return
+
+        latest = version_check.latest
+        self.update_required = latest.is_forced
+        self.update_download_url = latest.download_url
+        update_type = "强制更新" if latest.is_forced else "发现更新"
+        self.version_var.set(f"{update_type}：{CLIENT_VERSION} -> {latest.version_number}")
+        self._append_log(f"[update] {update_type}: {latest.version_number}")
+        if latest.release_notes:
+            self._append_log(f"[update] {latest.release_notes}")
+        self._set_logged_in_ui(True)
+        if latest.is_forced:
+            messagebox.showwarning(
+                "需要更新客户端",
+                f"当前版本 {CLIENT_VERSION} 已不支持，请下载 {latest.version_number} 后再采集。",
+            )
+        else:
+            messagebox.showinfo(
+                "发现新版本",
+                f"发现新版本 {latest.version_number}，可以点击“下载更新”获取新版。",
+            )
+
+    def download_update(self) -> None:
+        if not self.update_download_url:
+            messagebox.showinfo("没有可下载更新", "当前没有可下载的客户端更新")
+            return
+        webbrowser.open(self.update_download_url)
 
     def _select_saved_stream(self) -> None:
         selected_id = self.vars["SELECTED_STREAM_ID"].get().strip()
@@ -331,6 +412,9 @@ class ForwarderApp:
     def start_forwarder(self) -> None:
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("采集中", "采集器已经在运行")
+            return
+        if self.update_required:
+            messagebox.showwarning("需要更新客户端", "当前客户端版本必须更新后才能继续采集")
             return
         stream = self._selected_stream()
         game = self._selected_game()
@@ -404,11 +488,12 @@ class ForwarderApp:
         if isinstance(message, tuple):
             event = message[0]
             if event == "login_success":
-                _event, platform_url, token, bootstrap = message
+                _event, platform_url, token, bootstrap, version_check, version_error = message
                 self.vars["PLATFORM_URL"].set(platform_url)
                 self.vars["ACCESS_TOKEN"].set(token)
                 self.vars["PASSWORD"].set("")
                 self._apply_bootstrap(bootstrap)
+                self._apply_version_check(version_check, version_error)
                 self._save_values()
                 self.login_button.configure(state=tk.NORMAL)
                 self._append_log("[auth] login succeeded")
@@ -420,9 +505,10 @@ class ForwarderApp:
                 messagebox.showerror("登录失败", message[1])
                 return
             if event == "refresh_success":
-                _event, bootstrap, silent = message
+                _event, bootstrap, version_check, version_error, silent = message
                 self.refresh_button.configure(state=tk.NORMAL)
                 self._apply_bootstrap(bootstrap)
+                self._apply_version_check(version_check, version_error)
                 self._save_values()
                 if not silent:
                     self._append_log("[config] platform config refreshed")
@@ -438,7 +524,7 @@ class ForwarderApp:
 
         if message == "[status] stopped":
             self.status_var.set("已停止")
-            self.start_button.configure(state=tk.NORMAL)
+            self.start_button.configure(state=tk.DISABLED if self.update_required else tk.NORMAL)
         else:
             self._append_log(message)
 
@@ -454,7 +540,8 @@ class ForwarderApp:
     def _set_logged_in_ui(self, logged_in: bool) -> None:
         state = tk.NORMAL if logged_in else tk.DISABLED
         self.refresh_button.configure(state=state)
-        self.start_button.configure(state=state)
+        self.start_button.configure(state=tk.NORMAL if logged_in and not self.update_required else tk.DISABLED)
+        self.update_button.configure(state=tk.NORMAL if logged_in and self.update_download_url else tk.DISABLED)
         self.logout_button.configure(state=state)
         self.stream_box.configure(state="readonly" if logged_in else tk.DISABLED)
         self.game_box.configure(state="readonly" if logged_in else tk.DISABLED)

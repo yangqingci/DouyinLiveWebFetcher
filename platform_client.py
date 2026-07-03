@@ -7,6 +7,9 @@ import requests
 
 REQUEST_TIMEOUT_SEC = 10.0
 DEFAULT_PLATFORM_URL = "http://www.yangqingci.com"
+CLIENT_CODE = "douyin_forwarder"
+CLIENT_PLATFORM = "windows"
+CLIENT_VERSION = "1.1.0"
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,33 @@ class PlatformBootstrap:
     config: PlatformBootstrapConfig
 
 
+@dataclass(frozen=True)
+class PlatformVersionLatest:
+    id: int
+    client_code: str
+    client_name: str
+    platform: str
+    version_number: str
+    version_name: str
+    is_forced: bool
+    min_supported_version: str
+    download_url: str
+    package_name: str
+    file_size: int
+    sha256: str
+    release_notes: str
+    published_at: str | None
+
+
+@dataclass(frozen=True)
+class PlatformVersionCheck:
+    client_code: str
+    platform: str
+    current_version: str
+    has_update: bool
+    latest: PlatformVersionLatest | None
+
+
 class PlatformClientError(RuntimeError):
     pass
 
@@ -93,6 +123,30 @@ class PlatformClient:
         if response.status_code >= 400:
             raise PlatformClientError(_error_message(payload, "读取平台配置失败"))
         return _parse_bootstrap(payload)
+
+    def check_version(
+        self,
+        *,
+        client_code: str = CLIENT_CODE,
+        platform: str = CLIENT_PLATFORM,
+        version: str = CLIENT_VERSION,
+    ) -> PlatformVersionCheck:
+        if not self.access_token:
+            raise PlatformClientError("请先登录平台账号")
+        response = requests.get(
+            self._url("/api/client/version/check"),
+            headers={"Authorization": f"Bearer {self.access_token}"},
+            params={
+                "client_code": client_code,
+                "platform": platform,
+                "version": version,
+            },
+            timeout=REQUEST_TIMEOUT_SEC,
+        )
+        payload = _response_json(response)
+        if response.status_code >= 400:
+            raise PlatformClientError(_error_message(payload, "检查客户端版本失败"))
+        return _parse_version_check(payload)
 
     def _url(self, path: str) -> str:
         return urljoin(f"{self.base_url}/", path.lstrip("/"))
@@ -167,4 +221,37 @@ def _parse_bootstrap(payload: dict[str, object]) -> PlatformBootstrap:
             api_base_path=str(config_payload.get("api_base_path") or "/api"),
             features=raw_features if isinstance(raw_features, dict) else {},
         ),
+    )
+
+
+def _parse_version_check(payload: dict[str, object]) -> PlatformVersionCheck:
+    latest_payload = payload.get("latest")
+    latest = None
+    if isinstance(latest_payload, dict):
+        latest = PlatformVersionLatest(
+            id=int(latest_payload.get("id") or 0),
+            client_code=str(latest_payload.get("client_code") or ""),
+            client_name=str(latest_payload.get("client_name") or ""),
+            platform=str(latest_payload.get("platform") or ""),
+            version_number=str(latest_payload.get("version_number") or ""),
+            version_name=str(latest_payload.get("version_name") or ""),
+            is_forced=bool(latest_payload.get("is_forced")),
+            min_supported_version=str(latest_payload.get("min_supported_version") or ""),
+            download_url=str(latest_payload.get("download_url") or ""),
+            package_name=str(latest_payload.get("package_name") or ""),
+            file_size=int(latest_payload.get("file_size") or 0),
+            sha256=str(latest_payload.get("sha256") or ""),
+            release_notes=str(latest_payload.get("release_notes") or ""),
+            published_at=(
+                str(latest_payload.get("published_at"))
+                if latest_payload.get("published_at") is not None
+                else None
+            ),
+        )
+    return PlatformVersionCheck(
+        client_code=str(payload.get("client_code") or CLIENT_CODE),
+        platform=str(payload.get("platform") or CLIENT_PLATFORM),
+        current_version=str(payload.get("current_version") or CLIENT_VERSION),
+        has_update=bool(payload.get("has_update")),
+        latest=latest,
     )
