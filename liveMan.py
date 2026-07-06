@@ -144,6 +144,12 @@ class DouyinLiveWebFetcher:
         self.__ttwid = None
         self.__room_id = None
         self.on_comment = None
+        self.on_gift = None
+        self.on_like = None
+        self.on_member = None
+        self.on_social = None
+        self.on_fansclub = None
+        self.on_stats = None
         self.log = log
         self.log_events = log_events
         self.session = requests.Session()
@@ -161,6 +167,14 @@ class DouyinLiveWebFetcher:
     def _event_log(self, *parts):
         if self.log_events:
             self._log(*parts)
+
+    def _emit(self, handler, event):
+        if handler is None:
+            return
+        try:
+            handler(event)
+        except Exception as exc:
+            self._log(f"[event] handler error: {exc}")
     
     def start(self):
         self._connectWebSocket()
@@ -403,14 +417,25 @@ class DouyinLiveWebFetcher:
         gift_name = message.gift.name
         gift_cnt = message.combo_count
         self._event_log(f"【礼物msg】{user_name} 送出了 {gift_name}x{gift_cnt}")
-    
+        self._emit(self.on_gift, {
+            "event_type": "gift",
+            "nickname": user_name,
+            "gift_name": gift_name,
+            "gift_count": int(gift_cnt or 1),
+        })
+
     def _parseLikeMsg(self, payload):
         '''点赞消息'''
         message = LikeMessage().parse(payload)
         user_name = message.user.nick_name
         count = message.count
         self._event_log(f"【点赞msg】{user_name} 点了{count}个赞")
-    
+        self._emit(self.on_like, {
+            "event_type": "like",
+            "nickname": user_name,
+            "like_count": int(count or 1),
+        })
+
     def _parseMemberMsg(self, payload):
         '''进入直播间消息'''
         message = MemberMessage().parse(payload)
@@ -418,26 +443,46 @@ class DouyinLiveWebFetcher:
         user_id = message.user.id
         gender = ["女", "男"][message.user.gender]
         self._event_log(f"【进场msg】[{user_id}][{gender}]{user_name} 进入了直播间")
-    
+        self._emit(self.on_member, {
+            "event_type": "enter",
+            "nickname": user_name,
+            "metadata": {"user_id": str(user_id), "gender": gender},
+        })
+
     def _parseSocialMsg(self, payload):
         '''关注消息'''
         message = SocialMessage().parse(payload)
         user_name = message.user.nick_name
         user_id = message.user.id
         self._event_log(f"【关注msg】[{user_id}]{user_name} 关注了主播")
-    
+        self._emit(self.on_social, {
+            "event_type": "social",
+            "nickname": user_name,
+            "metadata": {"user_id": str(user_id)},
+        })
+
     def _parseRoomUserSeqMsg(self, payload):
         '''直播间统计'''
         message = RoomUserSeqMessage().parse(payload)
         current = message.total
         total = message.total_pv_for_anchor
         self._event_log(f"【统计msg】当前观看人数: {current}, 累计观看人数: {total}")
-    
+        self._emit(self.on_stats, {
+            "event_type": "stats",
+            "nickname": "",
+            "metadata": {"online": str(current), "total_pv": str(total)},
+        })
+
     def _parseFansclubMsg(self, payload):
         '''粉丝团消息'''
         message = FansclubMessage().parse(payload)
         content = message.content
         self._event_log(f"【粉丝团msg】 {content}")
+        self._emit(self.on_fansclub, {
+            "event_type": "fans_club",
+            "nickname": "",
+            "text": content,
+        })
     
     def _parseEmojiChatMsg(self, payload):
         '''聊天表情包消息'''

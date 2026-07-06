@@ -103,19 +103,45 @@ def load_runtime_config(argv: list[str]) -> tuple[str, IngestConfig]:
 
 
 def build_ingest_payload(
-    nickname: str,
-    text: str,
     room_id: str | None,
     game_code: str | None,
-) -> dict[str, str]:
-    payload = {"nickname": nickname, "text": text}
+    *,
+    event_type: str | None = None,
+    nickname: str = "",
+    text: str = "",
+    gift_name: str = "",
+    gift_count: int | None = None,
+    like_count: int | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    payload: dict = {"nickname": nickname, "text": text}
     normalized_room_id = (room_id or "").strip()
     if normalized_room_id:
         payload["douyin_room_id"] = normalized_room_id
     normalized_game_code = (game_code or "").strip()
     if normalized_game_code:
         payload["game_code"] = normalized_game_code
+    if event_type:
+        payload["event_type"] = event_type
+    if gift_name:
+        payload["gift_name"] = gift_name
+    if gift_count is not None:
+        payload["gift_count"] = gift_count
+    if like_count is not None:
+        payload["like_count"] = like_count
+    if metadata:
+        payload["metadata"] = metadata
     return payload
+
+
+def _post_payload(config: IngestConfig, payload: dict) -> None:
+    response = requests.post(
+        config.url,
+        headers={"X-Ingest-Token": config.token},
+        json=payload,
+        timeout=REQUEST_TIMEOUT_SEC,
+    )
+    response.raise_for_status()
 
 
 def post_comment(config: IngestConfig, message) -> None:
@@ -124,19 +150,33 @@ def post_comment(config: IngestConfig, message) -> None:
     text = getattr(message, "content", "") or ""
     if not text:
         return
-
-    response = requests.post(
-        config.url,
-        headers={"X-Ingest-Token": config.token},
-        json=build_ingest_payload(
-            nickname,
-            text,
+    _post_payload(
+        config,
+        build_ingest_payload(
             config.room_id,
             config.game_code,
+            event_type="chat",
+            nickname=nickname,
+            text=text,
         ),
-        timeout=REQUEST_TIMEOUT_SEC,
     )
-    response.raise_for_status()
+
+
+def post_event(config: IngestConfig, event: dict) -> None:
+    _post_payload(
+        config,
+        build_ingest_payload(
+            config.room_id,
+            config.game_code,
+            event_type=event.get("event_type"),
+            nickname=event.get("nickname", "") or "观众",
+            text=event.get("text", "") or "",
+            gift_name=event.get("gift_name", "") or "",
+            gift_count=event.get("gift_count"),
+            like_count=event.get("like_count"),
+            metadata=event.get("metadata"),
+        ),
+    )
 
 
 def run_forwarder(
@@ -151,10 +191,10 @@ def run_forwarder(
     last_progress_log = 0.0
     last_failure_log = 0.0
 
-    def on_comment(message) -> None:
+    def _dispatch(fn, *args) -> None:
         nonlocal failed_count, forwarded_count, last_failure_log, last_progress_log
         try:
-            post_comment(ingest_config, message)
+            fn(*args)
         except Exception as exc:
             failed_count += 1
             now = time.monotonic()
@@ -162,17 +202,23 @@ def run_forwarder(
                 log(f"[ingest] post failed ({failed_count} total): {exc}")
                 last_failure_log = now
             return
-
         forwarded_count += 1
         now = time.monotonic()
         if forwarded_count == 1 or now - last_progress_log >= 10:
-            log(f"[ingest] forwarded {forwarded_count} danmaku message(s)")
+            log(f"[ingest] forwarded {forwarded_count} event(s)")
             last_progress_log = now
 
-    fetcher.on_comment = on_comment
+    fetcher.on_comment = lambda msg: _dispatch(post_comment, ingest_config, msg)
+    fetcher.on_gift = lambda ev: _dispatch(post_event, ingest_config, ev)
+    fetcher.on_like = lambda ev: _dispatch(post_event, ingest_config, ev)
+    fetcher.on_member = lambda ev: _dispatch(post_event, ingest_config, ev)
+    fetcher.on_social = lambda ev: _dispatch(post_event, ingest_config, ev)
+    fetcher.on_fansclub = lambda ev: _dispatch(post_event, ingest_config, ev)
+    fetcher.on_stats = lambda ev: _dispatch(post_event, ingest_config, ev)
+
     game_label = ingest_config.game_code or "platform default"
     log(
-        f"[ingest] forwarding live {live_id} danmaku to "
+        f"[ingest] forwarding live {live_id} events to "
         f"{ingest_config.url} game={game_label}"
     )
     fetcher.start()
