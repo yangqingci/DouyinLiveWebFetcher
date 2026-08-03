@@ -112,6 +112,9 @@ def build_ingest_payload(
     gift_name: str = "",
     gift_count: int | None = None,
     like_count: int | None = None,
+    viewer_id: str = "",
+    avatar_url: str = "",
+    message_id: str = "",
     metadata: dict | None = None,
 ) -> dict:
     payload: dict = {"nickname": nickname, "text": text}
@@ -129,6 +132,15 @@ def build_ingest_payload(
         payload["gift_count"] = gift_count
     if like_count is not None:
         payload["like_count"] = like_count
+    normalized_viewer_id = str(viewer_id or "").strip()
+    if normalized_viewer_id:
+        payload["viewer_id"] = normalized_viewer_id
+    normalized_avatar_url = str(avatar_url or "").strip()
+    if normalized_avatar_url:
+        payload["avatar_url"] = normalized_avatar_url
+    normalized_message_id = str(message_id or "").strip()
+    if normalized_message_id:
+        payload["message_id"] = normalized_message_id
     if metadata:
         payload["metadata"] = metadata
     return payload
@@ -144,8 +156,23 @@ def _post_payload(config: IngestConfig, payload: dict) -> None:
     response.raise_for_status()
 
 
+def _viewer_id(user) -> str:
+    for field in ("sec_uid", "id_str", "id"):
+        value = str(getattr(user, field, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _avatar_url(user) -> str:
+    image = getattr(user, "avatar_thumb", None)
+    urls = getattr(image, "url_list_list", None) or []
+    return str(urls[0] or "").strip() if urls else ""
+
+
 def post_comment(config: IngestConfig, message) -> None:
     user = getattr(message, "user", None)
+    common = getattr(message, "common", None)
     nickname = getattr(user, "nick_name", "") or "观众"
     text = getattr(message, "content", "") or ""
     if not text:
@@ -158,6 +185,9 @@ def post_comment(config: IngestConfig, message) -> None:
             event_type="chat",
             nickname=nickname,
             text=text,
+            viewer_id=_viewer_id(user),
+            avatar_url=_avatar_url(user),
+            message_id=str(getattr(common, "msg_id", "") or ""),
         ),
     )
 
